@@ -1,0 +1,256 @@
+{
+  "name": "LendLoop - Workflow 2: Overdue Reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily Schedule (09:00 UTC)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [220, 220]
+    },
+    {
+      "parameters": {},
+      "id": "manual-trigger",
+      "name": "Manual Trigger (Testing)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [220, 400]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.CONVEX_SITE_URL }}/api/overdue-loans",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.N8N_WEBHOOK_SECRET }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "fetch-overdue",
+      "name": "Fetch Overdue Loans (Convex)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst secret = ($env && $env.N8N_WEBHOOK_SECRET) ? String($env.N8N_WEBHOOK_SECRET) : '';\nconst discordUrl = ($env && $env.DISCORD_WEBHOOK_URL) ? String($env.DISCORD_WEBHOOK_URL).trim() : '';\nconst response = $input.first().json;\nconst loans = Array.isArray(response.loans) ? response.loans : [];\n\nif (loans.length === 0) {\n  console.log('[LendLoop Overdue] No overdue loans needing reminders today.');\n  return [];\n}\n\nconst hasDiscordWebhook = Boolean(discordUrl);\n\nreturn loans.map((loan) => {\n  const reminderText = `Reminder for ${loan.borrowerName}: \"${loan.toolName}\" (lent by ${loan.ownerName}) was due on ${loan.endDate} (${loan.daysOverdue} day(s) overdue).`;\n  const callbackObj = {\n    loanId: loan.loanId,\n    idempotencyKey: loan.idempotencyKey,\n    message: 'Overdue reminder sent'\n  };\n  const callbackBody = JSON.stringify(callbackObj);\n  const callbackSignature = 'sha256=' + crypto.createHmac('sha256', secret).update(callbackBody, 'utf8').digest('hex');\n\n  return {\n    json: {\n      loanId: loan.loanId,\n      idempotencyKey: loan.idempotencyKey,\n      reminderText,\n      hasDiscordWebhook,\n      discordPayload: JSON.stringify({ content: `**[LendLoop Overdue]** ${reminderText}` }),\n      callbackBody,\n      callbackSignature\n    }\n  };\n});"
+      },
+      "id": "prepare-reminders",
+      "name": "Prepare Reminders & Sign Callbacks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "discord-check",
+              "leftValue": "={{ $json.hasDiscordWebhook }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-discord-overdue",
+      "name": "IF Discord Webhook Set",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [980, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.discordPayload }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-discord-overdue",
+      "name": "Send Overdue Discord Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1240, 200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\nfor (const item of $input.all()) {\n  console.log(`[LendLoop Overdue Reminder] ${item.json.reminderText}`);\n  results.push(item);\n}\nreturn results;"
+      },
+      "id": "log-overdue-fallback",
+      "name": "Log Overdue Reminder (Fallback)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1240, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CONVEX_SITE_URL }}/api/mark-reminder-sent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Hub-Signature-256",
+              "value": "={{ $('Prepare Reminders & Sign Callbacks').item.json.callbackSignature }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $('Prepare Reminders & Sign Callbacks').item.json.callbackBody }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "mark-reminder-sent",
+      "name": "Mark Reminder Sent (Idempotent HMAC)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1500, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Daily Schedule (09:00 UTC)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Overdue Loans (Convex)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger (Testing)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Overdue Loans (Convex)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Overdue Loans (Convex)": {
+      "main": [
+        [
+          {
+            "node": "Prepare Reminders & Sign Callbacks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Reminders & Sign Callbacks": {
+      "main": [
+        [
+          {
+            "node": "IF Discord Webhook Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Discord Webhook Set": {
+      "main": [
+        [
+          {
+            "node": "Send Overdue Discord Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Overdue Reminder (Fallback)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Overdue Discord Reminder": {
+      "main": [
+        [
+          {
+            "node": "Mark Reminder Sent (Idempotent HMAC)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Overdue Reminder (Fallback)": {
+      "main": [
+        [
+          {
+            "node": "Mark Reminder Sent (Idempotent HMAC)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

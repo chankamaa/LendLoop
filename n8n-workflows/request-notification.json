@@ -1,0 +1,285 @@
+{
+  "name": "LendLoop - Workflow 1: Request Notification",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lendloop-request-event",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook: Loan Event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300],
+      "webhookId": "lendloop-request-event"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst secret = ($env && $env.N8N_WEBHOOK_SECRET) ? String($env.N8N_WEBHOOK_SECRET) : '';\nconst discordUrl = ($env && $env.DISCORD_WEBHOOK_URL) ? String($env.DISCORD_WEBHOOK_URL).trim() : '';\nconst item = $input.first();\nconst headers = item.json.headers || {};\nconst receivedSig = String(headers['x-hub-signature-256'] || headers['X-Hub-Signature-256'] || '').trim();\n\n// Extract exact raw body for byte-accurate HMAC verification\nlet rawBody = '';\nif (item.binary && item.binary.data && item.binary.data.data) {\n  rawBody = Buffer.from(item.binary.data.data, 'base64').toString('utf8');\n} else if (typeof item.json.body === 'string') {\n  rawBody = item.json.body;\n} else {\n  rawBody = JSON.stringify(item.json.body ?? {});\n}\n\nlet valid = false;\ntry {\n  if (secret && receivedSig && rawBody) {\n    const expectedSig = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('hex');\n    const bufA = Buffer.from(receivedSig, 'utf8');\n    const bufB = Buffer.from(expectedSig, 'utf8');\n    if (bufA.length === bufB.length) {\n      valid = crypto.timingSafeEqual(bufA, bufB);\n    }\n  }\n} catch (_) {\n  valid = false;\n}\n\nif (!valid) {\n  return [{ json: { valid: false, error: 'Invalid HMAC-SHA256 signature' } }];\n}\n\n// Data minimization: extract only the minimal fields required for notification & callback\nconst parsed = typeof item.json.body === 'object' && item.json.body !== null\n  ? item.json.body\n  : JSON.parse(rawBody);\n\nconst loanId = String(parsed.loanId || '');\nconst event = String(parsed.event || 'updated');\nconst toolName = String(parsed.toolName || 'Tool');\nconst borrowerName = String(parsed.borrowerName || 'Neighbor');\nconst ownerName = String(parsed.ownerName || 'Owner');\nconst startDate = String(parsed.startDate || '');\nconst endDate = String(parsed.endDate || '');\nconst idempotencyKey = String(parsed.idempotencyKey || `${loanId}:${event}:${Date.now()}`);\n\nconst eventSummaryMap = {\n  created: `New borrow request for \"${toolName}\" by ${borrowerName} (${startDate} to ${endDate})`,\n  approved: `${ownerName} approved ${borrowerName}'s request for \"${toolName}\"`,\n  declined: `${ownerName} declined ${borrowerName}'s request for \"${toolName}\"`,\n  returned: `${ownerName} marked \"${toolName}\" as returned by ${borrowerName}`\n};\n\nconst cardMessageMap = {\n  created: 'Request notification sent',\n  approved: 'Approval notification sent',\n  declined: 'Decline notification sent',\n  returned: 'Return confirmation sent'\n};\n\nconst notificationText = eventSummaryMap[event] || `Loan update (${event}) for \"${toolName}\"`;\nconst callbackPayloadObj = {\n  loanId,\n  idempotencyKey,\n  eventType: `loan_${event}`,\n  message: cardMessageMap[event] || 'Notification sent'\n};\nconst callbackBody = JSON.stringify(callbackPayloadObj);\nconst callbackSignature = 'sha256=' + crypto.createHmac('sha256', secret).update(callbackBody, 'utf8').digest('hex');\n\nreturn [{\n  json: {\n    valid: true,\n    loanId,\n    event,\n    notificationText,\n    hasDiscordWebhook: Boolean(discordUrl),\n    discordPayload: JSON.stringify({ content: `**[LendLoop]** ${notificationText}` }),\n    callbackBody,\n    callbackSignature\n  }\n}];"
+      },
+      "id": "verify-hmac",
+      "name": "Verify HMAC-SHA256 & Minimize Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "hmac-valid-check",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-signature-valid",
+      "name": "IF Signature Valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"error\": \"Invalid HMAC-SHA256 signature\" }",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "id": "respond-401",
+      "name": "Respond 401 Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [960, 480]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "discord-configured-check",
+              "leftValue": "={{ $json.hasDiscordWebhook }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-discord-configured",
+      "name": "IF Discord Webhook Set",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [960, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.discordPayload }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-discord",
+      "name": "Send Discord Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1220, 100],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconsole.log(`[LendLoop Notification] ${item.notificationText}`);\nreturn [{ json: item }];"
+      },
+      "id": "log-fallback",
+      "name": "Log Notification (Fallback)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1220, 280]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CONVEX_SITE_URL }}/api/automation-callback",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Hub-Signature-256",
+              "value": "={{ $('Verify HMAC-SHA256 & Minimize Data').item.json.callbackSignature }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $('Verify HMAC-SHA256 & Minimize Data').item.json.callbackBody }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "callback-convex",
+      "name": "Callback Convex (HMAC Signed)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1480, 200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true }",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-200",
+      "name": "Respond 200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1720, 200]
+    }
+  ],
+  "connections": {
+    "Webhook: Loan Event": {
+      "main": [
+        [
+          {
+            "node": "Verify HMAC-SHA256 & Minimize Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify HMAC-SHA256 & Minimize Data": {
+      "main": [
+        [
+          {
+            "node": "IF Signature Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Signature Valid": {
+      "main": [
+        [
+          {
+            "node": "IF Discord Webhook Set",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 401 Unauthorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Discord Webhook Set": {
+      "main": [
+        [
+          {
+            "node": "Send Discord Notification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Notification (Fallback)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Discord Notification": {
+      "main": [
+        [
+          {
+            "node": "Callback Convex (HMAC Signed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Notification (Fallback)": {
+      "main": [
+        [
+          {
+            "node": "Callback Convex (HMAC Signed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Callback Convex (HMAC Signed)": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

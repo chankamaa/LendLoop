@@ -1,0 +1,121 @@
+{
+  "name": "LendLoop - Error Workflow (Dead-Letter Alerting)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const err = $input.first().json;\nconst discordUrl = ($env && $env.DISCORD_WEBHOOK_URL) ? String($env.DISCORD_WEBHOOK_URL).trim() : '';\nconst workflowName = err.workflow?.name || 'Unknown Workflow';\nconst executionId = err.execution?.id || 'unknown';\nconst lastNode = err.execution?.lastNodeExecuted || 'unknown';\nconst errorMessage = err.execution?.error?.message || 'Unspecified error';\n\nconst alertText = `[LendLoop n8n ERROR] Workflow=\"${workflowName}\" Execution=#${executionId} Node=\"${lastNode}\" Error=\"${errorMessage}\"`;\nconsole.error(alertText);\n\nreturn [{\n  json: {\n    alertText,\n    hasDiscordWebhook: Boolean(discordUrl),\n    discordPayload: JSON.stringify({ content: `🚨 **${alertText}**` })\n  }\n}];"
+      },
+      "id": "format-error",
+      "name": "Format & Log Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-discord-error",
+              "leftValue": "={{ $json.hasDiscordWebhook }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-discord-error",
+      "name": "IF Discord Webhook Set",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DISCORD_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.discordPayload }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-discord-error",
+      "name": "Alert Discord Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [980, 220],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format & Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format & Log Error": {
+      "main": [
+        [
+          {
+            "node": "IF Discord Webhook Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Discord Webhook Set": {
+      "main": [
+        [
+          {
+            "node": "Alert Discord Channel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
